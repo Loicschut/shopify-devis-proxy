@@ -89,10 +89,7 @@ app.get("/devis", async (req, res) => {
       }
     `;
 
-    const variables = {
-      after,
-      q: `customerId:${numericId}` // ⚠️ camelCase correct
-    };
+const variables = { after, q: `customer_id:${numericId}` };
 
     const resp = await fetch(
       `https://${process.env.SHOP_DOMAIN}/admin/api/${process.env.ADMIN_API_VERSION}/graphql.json`,
@@ -107,14 +104,16 @@ app.get("/devis", async (req, res) => {
     );
 
     if (!resp.ok) {
-      const txt = await resp.text();
-      return res.status(resp.status).json({ error: "admin_api_error", details: txt });
-    }
+   const txt = await resp.text();
+   console.error("[AdminAPI] HTTP", resp.status, txt);
+   return res.status(resp.status).json({ error: "admin_api_error" });
+ }
 
     const json = await resp.json();
     if (json.errors) {
-      return res.status(500).json({ error: "graphql_errors", details: json.errors });
-    }
+   console.error("[AdminAPI] GraphQL errors:", JSON.stringify(json.errors));
+   return res.status(500).json({ error: "graphql_errors" });
+ }
 
     const edges = json?.data?.draftOrders?.edges || [];
     const pageInfo = json?.data?.draftOrders?.pageInfo || {};
