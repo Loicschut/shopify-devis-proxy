@@ -20,11 +20,7 @@ function hmacHex(secret, raw) {
   return crypto.createHmac("sha256", secret).update(raw, "utf8").digest("hex");
 }
 
-/** Vérifie la signature de l’App Proxy.
- * - Shopify envoie généralement x-shopify-proxy-signature (base64) ou x-shopify-hmac-sha256.
- * - On hash l’URL brute (req.originalUrl) pour respecter l’ordre des paramètres.
- * - On gère aussi l’ancien ?signature= en hex.
- */
+/** Vérifie la signature de l’App Proxy. */
 function verifyProxy(req) {
   const secret = process.env.APP_PROXY_SHARED_SECRET || "";
   if (!secret) return false;
@@ -36,7 +32,7 @@ function verifyProxy(req) {
   const { signature: legacySig, ...rest } = req.query || {};
 
   if (headerSig) {
-    const raw1 = req.originalUrl;                           // "/devis?customer_id=...&after=..."
+    const raw1 = req.originalUrl; // "/devis?customer_id=...&after=..."
     const sig1 = hmacBase64(secret, raw1);
     if (safeEqual(headerSig, sig1)) return true;
 
@@ -54,80 +50,135 @@ function verifyProxy(req) {
   return false;
 }
 
-/* --------------------------- Endpoint App Proxy -------------------------- */
+/* --------------------------- Helpers GraphQL ---------------------------- */
 
+async function adminGraphQL(query, variables = {}) {
+  const url = `https://${process.env.SHOP_DOMAIN}/admin/api/${process.env.ADMIN_API_VERSION}/graphql.json`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": process.env.ADMIN_ACCESS_TOKEN || ""
+    },
+    body: JSON.stringify({ query, variables })
+  });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`[AdminAPI] HTTP ${resp.status}: ${txt}`);
+  }
+  const json = await resp.json();
+  if (json.errors) {
+    throw new Error(`[AdminAPI] GraphQL errors: ${JSON.stringify(json.errors)}`);
+  }
+  return json.data;
+}
+
+/** Convertit un GID "gid://shopify/DraftOrder/123" en "123" */
+function gidToLegacyId(gid) {
+  if (!gid) return null;
+  if (String(gid).startsWith("gid://")) {
+    const last = String(gid).split("/").pop();
+    if (/^\d+$/.test(last)) return last;
+  }
+  if (/^\d+$/.test(String(gid))) return String(gid);
+  return null;
+}
+
+/** Normalise un DraftOrder GraphQL -> objet simple pour le front */
+function mapDraftOrderNode(node, includeItems = false) {
+  return {
+    id: node.id, // GID
+    legacyResourceId: node.legacyResourceId,
+    name: node.name,
+    createdAt: node.createdAt,
+    status: node.status,
+    invoiceUrl: node.invoiceUrl,
+    total: node.totalPriceSet?.presentmentMoney
+      ? `${node.totalPriceSet.presentmentMoney.amount} ${node.totalPriceSet.presentmentMoney.currencyCode}`
+      : null,
+    ...(includeItems && node.lineItems
+      ? {
+          lineItems: (node.lineItems.edges || []).map(({ node: li }) => ({
+            title: li.title,
+            quantity: li.quantity,
+            variantTitle: li.variantTitle || ""
+          }))
+        }
+      : {})
+  };
+}
+
+/* --------------------------- Endpoint LISTE ----------------------------- */
+/** GET /devis?customer_id=<gid|id>&after=<cursor>&include=items
+ *  Renvoie { quotes[], pageInfo } ; si include=items, ajoute quotes[].lineItems[]
+ */
 app.get("/devis", async (req, res) => {
   try {
     if (!verifyProxy(req)) {
       return res.status(401).json({ error: "invalid_signature" });
     }
 
-    const customerGid = req.query.customer_id;
-    const after = req.query.after || null;
-    if (!customerGid) {
+    const customerParam = req.query.customer_id;
+    if (!customerParam) {
       return res.status(400).json({ error: "missing customer_id" });
     }
 
-    const numericId = customerGid.split("/").pop(); // ID numérique
+    const customerLegacyId = gidToLegacyId(customerParam);
+    if (!customerLegacyId) {
+      return res.status(400).json({ error: "bad customer_id" });
+    }
 
-    const query = `#graphql
-  query ListDraftOrders($after: String, $q: String!) {
-    draftOrders(first: 10, after: $after, query: $q) {
-      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
-      edges {
-        node {
-          id
-          name
-          createdAt
-          status
-          invoiceUrl
-          totalPriceSet { presentmentMoney { amount currencyCode } }
-          customer { id }
+    const after = req.query.after || null;
+    const includeItems = String(req.query.include || "").toLowerCase() === "items";
+
+    // On inclut les items seulement si demandé, pour éviter des coûts inutiles
+    const lineItemsFrag = includeItems
+      ? `
+        lineItems(first: 50) {
+          edges {
+            node { title quantity variantTitle }
+          }
+        }`
+      : ``;
+
+    const query = `
+      query ListDraftOrders($first:Int!, $after:String, $q:String!) {
+        draftOrders(first: $first, after: $after, query: $q) {
+          pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+          edges {
+            cursor
+            node {
+              id
+              legacyResourceId
+              name
+              createdAt
+              status
+              invoiceUrl
+              totalPriceSet { presentmentMoney { amount currencyCode } }
+              customer { id }
+              ${lineItemsFrag}
+            }
+          }
         }
       }
-    }
-  }
-`;
+    `;
 
+    // Filtre par client : draft order ne supporte pas un query très riche, mais "customer_id:<legacyId>" marche
+    const variables = {
+      first: 10,
+      after,
+      q: `customer_id:${customerLegacyId}`
+    };
 
-const variables = { after, q: `customer_id:${numericId}` };
+    const data = await adminGraphQL(query, variables);
+    const edges = data?.draftOrders?.edges || [];
+    const pageInfo = data?.draftOrders?.pageInfo || {};
 
-    const resp = await fetch(
-      `https://${process.env.SHOP_DOMAIN}/admin/api/${process.env.ADMIN_API_VERSION}/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": process.env.ADMIN_ACCESS_TOKEN || ""
-        },
-        body: JSON.stringify({ query, variables })
-      }
-    );
+    const quotes = edges.map(({ node }) => mapDraftOrderNode(node, includeItems));
 
-    if (!resp.ok) {
-   const txt = await resp.text();
-   console.error("[AdminAPI] HTTP", resp.status, txt);
-   return res.status(resp.status).json({ error: "admin_api_error" });
- }
-
-    const json = await resp.json();
-    if (json.errors) {
-   console.error("[AdminAPI] GraphQL errors:", JSON.stringify(json.errors));
-   return res.status(500).json({ error: "graphql_errors" });
- }
-
-    const edges = json?.data?.draftOrders?.edges || [];
-    const pageInfo = json?.data?.draftOrders?.pageInfo || {};
-    const quotes = edges.map(({ node }) => ({
-      id: node.id,
-      name: node.name,
-      createdAt: node.createdAt,
-      status: node.status,
-      invoiceUrl: node.invoiceUrl,
-      total: node.totalPriceSet?.presentmentMoney
-        ? `${node.totalPriceSet.presentmentMoney.amount} ${node.totalPriceSet.presentmentMoney.currencyCode}`
-        : null
-    }));
+    // Anti-cache côté proxy
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.setHeader("Pragma", "no-cache");
 
     return res.json({ quotes, pageInfo });
   } catch (e) {
@@ -136,10 +187,4 @@ const variables = { after, q: `customer_id:${numericId}` };
   }
 });
 
-app.get("/", (_req, res) => {
-  res.type("text/plain").send("Shopify Draft Orders App Proxy is running. /devis is the proxy endpoint.");
-});
-
-app.listen(PORT, () => {
-  console.log(`Proxy running on port ${PORT}`);
-});
+/* -------------------------- Endpoint DÉTAIL ----------*
