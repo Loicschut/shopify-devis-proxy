@@ -71,23 +71,24 @@ app.get("/devis", async (req, res) => {
     const numericId = customerGid.split("/").pop(); // ID numérique
 
     const query = `#graphql
-      query ListDraftOrders($after: String, $q: String!) {
-        draftOrders(first: 10, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
-          pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
-          edges {
-            node {
-              id
-              name
-              createdAt
-              status
-              invoiceUrl
-              totalPriceSet { presentmentMoney { amount currencyCode } }
-              customer { id }
-            }
-          }
+  query ListDraftOrders($after: String, $q: String!) {
+    draftOrders(first: 10, after: $after, query: $q) {
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+      edges {
+        node {
+          id
+          name
+          createdAt
+          status
+          invoiceUrl
+          totalPriceSet { presentmentMoney { amount currencyCode } }
+          customer { id }
         }
       }
-    `;
+    }
+  }
+`;
+
 
 const variables = { after, q: `customer_id:${numericId}` };
 
