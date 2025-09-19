@@ -1,20 +1,15 @@
-// server.js (CommonJS, Node 18+)
-
-const express = require("express");
-const crypto = require("crypto");
-require("dotenv").config();
+// server.js — ESM (package.json: { "type": "module" })
+import express from "express";
+import crypto from "crypto";
+import "dotenv/config";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 /* -------------------- Vérification App Proxy -------------------- */
-
 function safeEqual(a, b) {
-  try {
-    return crypto.timingSafeEqual(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
-  } catch {
-    return false;
-  }
+  try { return crypto.timingSafeEqual(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")); }
+  catch { return false; }
 }
 function hmacBase64(secret, raw) {
   return crypto.createHmac("sha256", secret).update(raw, "utf8").digest("base64");
@@ -22,13 +17,13 @@ function hmacBase64(secret, raw) {
 function hmacHex(secret, raw) {
   return crypto.createHmac("sha256", secret).update(raw, "utf8").digest("hex");
 }
-
 function verifyProxy(req) {
   const secret = process.env.APP_PROXY_SHARED_SECRET || "";
   if (!secret) return false;
 
   const headerSig =
-    req.headers["x-shopify-proxy-signature"] || req.headers["x-shopify-hmac-sha256"];
+    req.headers["x-shopify-proxy-signature"] ||
+    req.headers["x-shopify-hmac-sha256"];
 
   const { signature: legacySig, ...rest } = req.query || {};
 
@@ -43,43 +38,34 @@ function verifyProxy(req) {
   }
 
   if (legacySig) {
-    const sorted = Object.keys(rest)
-      .sort()
-      .map((k) => `${k}=${rest[k]}`)
-      .join("");
+    const sorted = Object.keys(rest).sort().map(k => `${k}=${rest[k]}`).join("");
     const hex = hmacHex(secret, sorted);
     if (safeEqual(legacySig, hex)) return true;
   }
-
   return false;
 }
 
 /* --------------------------- Helpers Admin API --------------------------- */
-
 async function adminGraphQL(query, variables = {}) {
   const shop = process.env.SHOP_DOMAIN;
   const version = process.env.ADMIN_API_VERSION;
   const token = process.env.ADMIN_ACCESS_TOKEN;
   if (!shop || !version || !token) {
-    throw new Error("Missing env: SHOP_DOMAIN, ADMIN_API_VERSION, or ADMIN_ACCESS_TOKEN");
+    throw new Error("Missing env: SHOP_DOMAIN, ADMIN_API_VERSION, ADMIN_ACCESS_TOKEN");
   }
-
   const url = `https://${shop}/admin/api/${version}/graphql.json`;
-
   const resp = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Shopify-Access-Token": token,
+      "X-Shopify-Access-Token": token
     },
-    body: JSON.stringify({ query, variables }),
+    body: JSON.stringify({ query, variables })
   });
-
   if (!resp.ok) {
     const txt = await resp.text().catch(() => "");
     throw new Error(`[AdminAPI] HTTP ${resp.status}: ${txt}`);
   }
-
   const json = await resp.json();
   if (json.errors) {
     throw new Error(`[AdminAPI] GraphQL errors: ${JSON.stringify(json.errors)}`);
@@ -114,15 +100,14 @@ function mapDraftOrderNode(node, includeItems = false) {
           lineItems: (node.lineItems.edges || []).map(({ node: li }) => ({
             title: li.title,
             quantity: li.quantity,
-            variantTitle: li.variantTitle || "",
-          })),
+            variantTitle: li.variantTitle || ""
+          }))
         }
-      : {}),
+      : {})
   };
 }
 
 /* ------------------------------ Endpoints ------------------------------- */
-
 // GET /devis?customer_id=<gid|id>&after=<cursor>&include=items
 app.get("/devis", async (req, res) => {
   try {
@@ -130,19 +115,15 @@ app.get("/devis", async (req, res) => {
 
     const customerParam = req.query.customer_id;
     if (!customerParam) return res.status(400).json({ error: "missing customer_id" });
-
     const customerLegacyId = gidToLegacyId(customerParam);
     if (!customerLegacyId) return res.status(400).json({ error: "bad customer_id" });
 
     const after = req.query.after || null;
     const includeItems = String(req.query.include || "").toLowerCase() === "items";
 
-    const lineItemsFrag = includeItems
-      ? `
-        lineItems(first: 50) {
-          edges { node { title quantity variantTitle } }
-        }`
-      : ``;
+    const lineItemsFrag = includeItems ? `
+      lineItems(first: 50) { edges { node { title quantity variantTitle } } }
+    ` : ``;
 
     const query = `
       query ListDraftOrders($first:Int!, $after:String, $q:String!) {
@@ -165,7 +146,6 @@ app.get("/devis", async (req, res) => {
         }
       }
     `;
-
     const variables = { first: 10, after, q: `customer_id:${customerLegacyId}` };
     const data = await adminGraphQL(query, variables);
 
@@ -195,11 +175,9 @@ app.get("/devis/:id", async (req, res) => {
       ? `gid://shopify/DraftOrder/${legacy}`
       : rawId;
 
-    const lineItemsFrag = includeItems
-      ? `
-        lineItems(first: 50) { edges { node { title quantity variantTitle } } }
-      `
-      : ``;
+    const lineItemsFrag = includeItems ? `
+      lineItems(first: 50) { edges { node { title quantity variantTitle } } }
+    ` : ``;
 
     const query = `
       query OneDraftOrder($id: ID!) {
@@ -215,7 +193,6 @@ app.get("/devis/:id", async (req, res) => {
         }
       }
     `;
-
     const data = await adminGraphQL(query, { id: gid });
     const n = data?.draftOrder;
     if (!n) return res.status(404).json({ error: "not_found" });
@@ -234,9 +211,7 @@ app.get("/devis/:id", async (req, res) => {
 
 // Root
 app.get("/", (_req, res) => {
-  res
-    .type("text/plain")
-    .send("Shopify Draft Orders App Proxy is running. Use /devis");
+  res.type("text/plain").send("Shopify Draft Orders App Proxy is running. Use /devis");
 });
 
 app.listen(PORT, "0.0.0.0", () => {
